@@ -1,6 +1,10 @@
 #3*5
+#iters 1024
+#delay 500
+#print
+
 i
 >v
 vev
-0x1
-oxo
+0.1
+o.o
