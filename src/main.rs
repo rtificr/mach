@@ -5,7 +5,7 @@ use std::io::Read;
 use colored::Colorize;
 use fancy_regex::Regex;
 
-const DEFAULT_MAX_ITERS: u16 = 1024;
+const DEFAULT_MAX_ITERS: u16 = 16;
 fn main() {
     let path = env::args().nth(1).unwrap_or(String::from("program.rt.mach"));
     let mut file = File::open(path).expect("File not found");
@@ -51,7 +51,6 @@ fn main() {
     let dims = dims.expect("No dimensions found");
 
     let mut grid = vec![vec!['.'; dims.0]; dims.1];
-
     for (y, line) in fstr.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && l.chars().nth(0) != Some('#')).enumerate() {
         for (x, c) in line.chars().enumerate() {
             grid[y][x] = c;
