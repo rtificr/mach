@@ -5,7 +5,7 @@ use std::io::Read;
 use colored::Colorize;
 use fancy_regex::Regex;
 
-const DEFAULT_MAX_ITERS: u16 = 1024;
+const DEFAULT_MAX_ITERS: u16 = 32768;
 fn main() {
     let path = env::args().nth(1).unwrap_or(String::from("program.rt.mach"));
     let mut file = File::open(path).expect("File not found");
