@@ -6,6 +6,7 @@ use colored::Colorize;
 use fancy_regex::Regex;
 
 const DEFAULT_MAX_ITERS: u16 = 32768;
+
 fn main() {
     let path = env::args().nth(1).unwrap_or(String::from("program.rt.mach"));
     let mut file = File::open(path).expect("File not found");
@@ -17,7 +18,7 @@ fn main() {
         .map(|m| m.expect("Error when looking for meta").as_str()).collect::<Vec<_>>();
 
     let dim_regex = Regex::new(r"^\d+\*\d+$").expect("Invalid regex");
-    let iter_regex = Regex::new(r"^(?:iters\s*)(\d+)$").expect("Invalid regex");
+    let iter_regex = Regex::new(r"^(?:iters?\s*)(\d+)$").expect("Invalid regex");
     let delay_regex = Regex::new(r"^(?:delay\s*)(\d+)$").expect("Invalid regex");
     let print_regex = Regex::new(r"^(?:print)$").expect("Invalid regex");
 
@@ -51,7 +52,10 @@ fn main() {
     let dims = dims.expect("No dimensions found");
 
     let mut grid = vec![vec!['.'; dims.0]; dims.1];
-    for (y, line) in fstr.lines().map(|l| l.trim()).filter(|l| !l.is_empty() && l.chars().nth(0) != Some('#')).enumerate() {
+    for (y, line) in fstr.lines().filter(|l| {
+        let t = l.trim();
+        !t.is_empty() && t.chars().nth(0) != Some('#')
+    }).enumerate() {
         for (x, c) in line.chars().enumerate() {
             grid[y][x] = c;
         }
@@ -59,28 +63,31 @@ fn main() {
 
     let ins = pos_of_chars(&grid, 'i');
 
+    println!();
     let mut inputs = HashMap::new();
     for i in ins {
         let mut input = String::new();
-        println!();
         println!("Enter input for cell at ({}, {}): ", i.0, i.1);
         std::io::stdin().read_line(&mut input).expect("Error reading input");
         println!();
-        let num = input.trim().parse::<i32>().expect("Invalid numerical input");
+        let num = input.trim().parse::<f64>().expect("Invalid numerical input");
         inputs.insert(i, num);
     }
 
-    let mut cells = inputs.clone();
+    let mut cells = inputs.iter().map(|(&pos, &val)| Cell { pos, val, dir: Dir::Down }).collect::<Vec<Cell>>();
     let mut iters = 0;
-    while cells.len() > 0 && iters < DEFAULT_MAX_ITERS {
+
+    while cells.len() > 0 && iters < max_iters {
         if max_iters != 0 {
             iters += 1;
         }
+        let rep = cells.iter().map(|c| (c.pos, c.val)).collect::<HashMap<_, _>>();
+
         if print {
             for y in 0..dims.1 {
                 for x in 0..dims.0 {
-                    if cells.contains_key(&(x, y)) {
-                        print!("{}", format!("{}", cells[&(x,y)]).red());
+                    if rep.contains_key(&(x, y)) {
+                        print!("{}", format!("{:.0}", rep[&(x,y)]%10.).red());
                     } else {
                         print!("{}", grid[y][x]);
                     }
@@ -89,38 +96,91 @@ fn main() {
             }
             println!();
         }
-        for (pos, val) in cells.clone().iter() {
-            match grid[pos.1][pos.0] {
+        let mut cells_to_remove = Vec::new();
+        let len = cells.len();
+        for (i, cell) in cells.iter_mut().enumerate() {
+            if iters == 0 && len > 0 {
+                println!("Ran out of iterations before all cells had been output. Set iterations to 0 to run indefinitely.");
+            }
+            match grid[cell.pos.1][cell.pos.0] {
                 'o' => {
-                    print!("{val}");
-                    cells.remove(pos);
+                    print!("{}", cell.val);
+                    cells_to_remove.push(i);
                 }
                 'e' => {
-                    if *val % 2 == 0 {
-                        move_cell(&mut cells, *pos, (pos.0 + 1, pos.1));
+                    cell.dir = if cell.val % 2. == 0f64 {
+                        Dir::Right
                     } else {
-                        move_cell(&mut cells, *pos, (pos.0 - 1, pos.1));
+                        Dir::Left
                     }
                 }
-                '>' => move_cell(&mut cells, *pos, (pos.0 + 1, pos.1)),
-                '<' => move_cell(&mut cells, *pos, (pos.0 - 1, pos.1)),
-                '^' => move_cell(&mut cells, *pos, (pos.0, pos.1 - 1)),
-                'v' => move_cell(&mut cells, *pos, (pos.0, pos.1 + 1)),
-                '0'..'9' => {
-                    let num = grid[pos.1][pos.0].to_digit(10).expect("Invalid digit") as i32;
-                    cells.insert(*pos, num);
-                    move_cell(&mut cells, *pos, (pos.0, pos.1 + 1));
-                }
+                '>' => cell.dir = Dir::Right,
+                '<' => cell.dir = Dir::Left,
+                '^' => cell.dir = Dir::Up,
+                'v' => cell.dir = Dir::Down,
                 '.' => {
-                    cells.remove(pos);
+                    cells_to_remove.push(i);
+                }
+                '+' => {
+                    cell.val += 1f64;
+                    cell.dir = Dir::Down;
+                }
+                '-' => {
+                    cell.val -= 1f64;
+                    cell.dir = Dir::Down;
+                }
+                '*' => {
+                    cell.val *= 2f64;
+                    cell.dir = Dir::Down;
+                }
+                '/' => {
+                    cell.val /= 2f64;
+                    cell.dir = Dir::Down;
+                }
+                '\\' => {
+                    cell.dir = match cell.dir {
+                        Dir::Up => Dir::Left,
+                        Dir::Down => Dir::Right,
+                        Dir::Left => Dir::Up,
+                        Dir::Right => Dir::Down,
+                        Dir::Neutral => Dir::Neutral,
+                    }
+                }
+                'z' => {
+                    if cell.val == 0f64 {
+                        cell.dir = Dir::Right;
+                    } else {
+                        cell.dir = Dir::Left;
+                    }
                 }
                 _ => {
-                    move_cell(&mut cells, *pos, (pos.0, pos.1 + 1));
+                    cell.dir = Dir::Down
                 }
             }
-            if iters == 0 && cells.len() > 0 {
-                println!("Ran out of iterations");
+        }
+        for cell in cells.iter_mut() {
+            match cell.dir {
+                Dir::Neutral => {}
+                _ => {
+                    let dir: (i8, i8) = cell.dir.clone().into();
+                    shift(cell, dir);
+                }
             }
+        }
+        for c1 in 0..cells.len() {
+            for c2 in 0..cells.len() {
+                if c1 == c2 {
+                    continue;
+                }
+
+                if cells[c1].pos == cells[c2].pos {
+                    cells[c1].val += cells[c2].val;
+                    cells_to_remove.push(c2);
+                }
+            }
+        }
+        for i in cells_to_remove.iter().rev() {
+            cells.remove(*i);
         }
         if delay.is_some() {
             std::thread::sleep(std::time::Duration::from_millis(delay.unwrap() as u64));
@@ -133,23 +193,49 @@ fn pos_of_chars(grid: &Vec<Vec<char>>, c: char) -> Vec<(usize, usize)> {
     for (i, row) in grid.iter().enumerate() {
         for (j, ch) in row.iter().enumerate() {
             if *ch == c {
-                pos.push((i, j));
+                pos.push((j, i));
             }
         }
     }
     pos
 }
 
-fn move_cell(
-    cells: &mut HashMap<(usize, usize), i32>,
-    from: (usize, usize),
-    to: (usize, usize))
-{
-    if cells.contains_key(&to) {
-        cells.insert(to, cells[&from] + cells[&to]);
-        cells.remove(&from);
-    } else {
-        cells.insert(to, cells[&from]);
-        cells.remove(&from);
+fn move_cell(cell: &mut Cell, to: (usize, usize)) {
+    cell.pos = to;
+}
+fn shift(cell: &mut Cell, dir: (i8, i8)) {
+    cell.pos = ((cell.pos.0 as isize + dir.0 as isize) as usize, (cell.pos.1 as isize + dir.1 as isize) as usize);
+    cell.dir = match dir {
+        (0, -1) => Dir::Up,
+        (0, 1) => Dir::Down,
+        (-1, 0) => Dir::Left,
+        (1, 0) => Dir::Right,
+        _ => panic!("Invalid direction")
+    };
+}
+
+#[derive(Clone, Debug)]
+struct Cell {
+    pub pos: (usize, usize),
+    pub val: f64,
+    pub dir: Dir
+}
+#[derive(Clone, Debug)]
+enum Dir {
+    Neutral,
+    Up,
+    Down,
+    Left,
+    Right,
+}
+impl Into<(i8, i8)> for Dir {
+    fn into(self) -> (i8, i8) {
+        match self {
+            Dir::Neutral => (0, 0),
+            Dir::Up => (0, -1),
+            Dir::Down => (0, 1),
+            Dir::Left => (-1, 0),
+            Dir::Right => (1, 0),
+        }
     }
 }
