@@ -1,7 +1,7 @@
-#8*8
-#delay 10
-#iters 10
-#print
+#10*10
+#delay 300
+
 i
-*\
-\^
+pv
+v<
+o

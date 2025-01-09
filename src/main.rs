@@ -1,9 +1,11 @@
+use std::cmp::PartialEq;
 use std::collections::HashMap;
-use std::env;
+use std::{env, io};
 use std::fs::File;
-use std::io::Read;
+use std::io::{Read, Write};
 use colored::Colorize;
 use fancy_regex::Regex;
+use std::process::Command;
 
 const DEFAULT_MAX_ITERS: u16 = 32768;
 
@@ -51,7 +53,7 @@ fn main() {
 
     let dims = dims.expect("No dimensions found");
 
-    let mut grid = vec![vec!['.'; dims.0]; dims.1];
+    let mut grid = vec![vec![' '; dims.0]; dims.1];
     for (y, line) in fstr.lines().filter(|l| {
         let t = l.trim();
         !t.is_empty() && t.chars().nth(0) != Some('#')
@@ -74,7 +76,7 @@ fn main() {
         inputs.insert(i, num);
     }
 
-    let mut cells = inputs.iter().map(|(&pos, &val)| Cell { pos, val, dir: Dir::Down }).collect::<Vec<Cell>>();
+    let mut cells = inputs.iter().map(|(&pos, &val)| Cell::new(pos, val, Dir::Down)).collect::<Vec<Cell>>();
     let mut iters = 0;
 
     while cells.len() > 0 && iters < max_iters {
@@ -84,10 +86,11 @@ fn main() {
         let rep = cells.iter().map(|c| (c.pos, c.val)).collect::<HashMap<_, _>>();
 
         if print {
+            print!("{}[2J", 27 as char);
             for y in 0..dims.1 {
                 for x in 0..dims.0 {
                     if rep.contains_key(&(x, y)) {
-                        print!("{}", format!("{:.0}", rep[&(x,y)]%10.).red());
+                        print!("{}", format!("{:.0}", rep[&(x, y)] % 10.).red());
                     } else {
                         print!("{}", grid[y][x]);
                     }
@@ -97,16 +100,22 @@ fn main() {
             println!();
         }
         let mut cells_to_remove = Vec::new();
+        let mut cells_to_add = Vec::new();
         let len = cells.len();
         for (i, cell) in cells.iter_mut().enumerate() {
-            if iters == 0 && len > 0 {
-                println!("Ran out of iterations before all cells had been output. Set iterations to 0 to run indefinitely.");
+            if cell.ignore {
+                continue;
             }
-            match grid[cell.pos.1][cell.pos.0] {
+            let cur = *grid.get(cell.pos.1).and_then(|r| r.get(cell.pos.0)).unwrap_or(&'.');
+
+            match cur {
+                // output
                 'o' => {
                     print!("{}", cell.val);
+                    io::stdout().flush().unwrap();
                     cells_to_remove.push(i);
                 }
+                // even
                 'e' => {
                     cell.dir = if cell.val % 2. == 0f64 {
                         Dir::Right
@@ -118,25 +127,20 @@ fn main() {
                 '<' => cell.dir = Dir::Left,
                 '^' => cell.dir = Dir::Up,
                 'v' => cell.dir = Dir::Down,
-                '.' => {
-                    cells_to_remove.push(i);
+                // slow
+                's' => {
+                    if cell.frozen {
+                        cell.frozen = false;
+                    } else {
+                        cell.frozen = true;
+                    }
                 }
-                '+' => {
-                    cell.val += 1f64;
-                    cell.dir = Dir::Down;
-                }
-                '-' => {
-                    cell.val -= 1f64;
-                    cell.dir = Dir::Down;
-                }
-                '*' => {
-                    cell.val *= 2f64;
-                    cell.dir = Dir::Down;
-                }
-                '/' => {
-                    cell.val /= 2f64;
-                    cell.dir = Dir::Down;
-                }
+                '.' => cells_to_remove.push(i),
+                '+' => cell.val += 1f64,
+                '-' => cell.val -= 1f64,
+                '*' => cell.val *= 2f64,
+                '/' => cell.val /= 2f64,
+                // bounce
                 '\\' => {
                     cell.dir = match cell.dir {
                         Dir::Up => Dir::Left,
@@ -146,48 +150,125 @@ fn main() {
                         Dir::Neutral => Dir::Neutral,
                     }
                 }
-                'z' => {
-                    if cell.val == 0f64 {
-                        cell.dir = Dir::Right;
+                // negate
+                '!' => {
+                    if cell.val == 0. {
+                        cell.val = 1.;
                     } else {
-                        cell.dir = Dir::Left;
+                        cell.val = -cell.val;
                     }
                 }
-                _ => {
-                    cell.dir = Dir::Down
+                // negative?
+                '_' => conditional(cell, cell.val < 0.),
+                'n' => cell.val = cell.val.clamp(0., 1.),
+                'c' => cell.val = cell.val.ceil(),
+                'f' => cell.val = cell.val.floor(),
+                '%' => cell.val = cell.val.fract(),
+                // poll
+                '?' => {
+                    let mut input = String::new();
+                    println!("Enter input for cell at ({}, {}): ", cell.pos.0, cell.pos.1);
+                    io::stdin().read_line(&mut input).expect("Error reading input");
+                    println!();
+                    cell.val = input.trim().parse::<f64>().expect("Invalid numerical input");
                 }
+                'p' | 'q' => if cell.dir == Dir::Up || cell.dir == Dir::Down {
+                    cells_to_add.push(Cell::new(cell.pos, cell.val, if cur == 'p' { Dir::Right } else { Dir::Left }));
+                }
+                'w' | 'm' => if cell.dir == Dir::Left || cell.dir == Dir::Right {
+                    cells_to_add.push(Cell::new(cell.pos, cell.val, if cur == 'w' { Dir::Down } else { Dir::Up }));
+                }
+                // split/jump
+                '|' => {
+                    if cell.dir == Dir::Up || cell.dir == Dir::Down {
+                        cell.dir = Dir::Left;
+                        cells_to_add.push(Cell::new(cell.pos, cell.val, Dir::Right));
+                    } else {
+                        match cell.dir {
+                            Dir::Left => shift(cell, (-1, 0)),
+                            Dir::Right => shift(cell, (1, 0)),
+                            _ => {}
+                        }
+                    }
+                }
+                // split/jump
+                '=' => {
+                    if cell.dir == Dir::Left || cell.dir == Dir::Right {
+                        cell.dir = Dir::Up;
+                        cells_to_add.push(Cell::new(cell.pos, cell.val, Dir::Down));
+                    } else {
+                        match cell.dir {
+                            Dir::Up => shift(cell, (0, -1)),
+                            Dir::Down => shift(cell, (0, 1)),
+                            _ => {}
+                        }
+                    }
+                }
+                'z' => {
+                    conditional(cell, cell.val == 0.);
+                }
+                _ => {}
             }
         }
-        for cell in cells.iter_mut() {
-            match cell.dir {
-                Dir::Neutral => {}
-                _ => {
-                    let dir: (i8, i8) = cell.dir.clone().into();
-                    shift(cell, dir);
-                }
+        // check for collision
+        for mut c1 in 0..cells.len() {
+            if cells[c1].ignore {
+                continue;
             }
-        }
-        for c1 in 0..cells.len() {
-            for c2 in 0..cells.len() {
+            for mut c2 in 0..cells.len() {
+                if cells[c2].ignore {
+                    continue;
+                }
                 if c1 == c2 {
                     continue;
                 }
 
                 if cells[c1].pos == cells[c2].pos {
-                    cells[c1].val += cells[c2].val;
-                    cells_to_remove.push(c2);
+                    if cells[c1].val == cells[c2].val {
+                        if cells[c1].dir == Dir::Right || cells[c1].dir == Dir::Down {
+                            cells[c1].val += cells[c2].val;
+                            cells[c2].ignore = true;
+                            cells_to_remove.push(c2);
+                        } else {
+                            cells[c2].val += cells[c1].val;
+                            cells[c1].ignore = true;
+                            cells_to_remove.push(c1);
+                        }
+                    } else if cells[c1].val > cells[c2].val {
+                        cells[c1].val += cells[c2].val;
+                        cells[c2].ignore = true;
+                        cells_to_remove.push(c2);
+                    } else {
+                        cells[c2].val += cells[c1].val;
+                        cells[c1].ignore = true;
+                        cells_to_remove.push(c1);
+                    }
                 }
             }
         }
         for i in cells_to_remove.iter().rev() {
-            cells.remove(*i);
+            if let Some(cell) = cells.get(*i) {
+                cells.remove(*i);
+            }
+        }
+        for cell in cells_to_add.iter() {
+            cells.push(cell.clone());
+        }
+        for cell in cells.iter_mut() {
+            match cell.dir {
+                Dir::Neutral => {}
+                _ if !cell.frozen => {
+                    let dir: (i8, i8) = cell.dir.clone().into();
+                    shift(cell, dir);
+                }
+                _ => {}
+            }
         }
         if delay.is_some() {
             std::thread::sleep(std::time::Duration::from_millis(delay.unwrap() as u64));
         }
     }
 }
-
 fn pos_of_chars(grid: &Vec<Vec<char>>, c: char) -> Vec<(usize, usize)> {
     let mut pos = Vec::new();
     for (i, row) in grid.iter().enumerate() {
@@ -205,22 +286,22 @@ fn move_cell(cell: &mut Cell, to: (usize, usize)) {
 }
 fn shift(cell: &mut Cell, dir: (i8, i8)) {
     cell.pos = ((cell.pos.0 as isize + dir.0 as isize) as usize, (cell.pos.1 as isize + dir.1 as isize) as usize);
-    cell.dir = match dir {
-        (0, -1) => Dir::Up,
-        (0, 1) => Dir::Down,
-        (-1, 0) => Dir::Left,
-        (1, 0) => Dir::Right,
-        _ => panic!("Invalid direction")
-    };
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 struct Cell {
     pub pos: (usize, usize),
     pub val: f64,
-    pub dir: Dir
+    pub dir: Dir,
+    pub frozen: bool,
+    pub ignore: bool, // cell will be deleted, don't bother to update
 }
-#[derive(Clone, Debug)]
+impl Cell {
+    pub fn new(pos: (usize, usize), val: f64, dir: Dir) -> Self {
+        Self { pos, val, dir, frozen: false, ignore: false }
+    }
+}
+#[derive(Clone, Debug, PartialEq)]
 enum Dir {
     Neutral,
     Up,
@@ -237,5 +318,24 @@ impl Into<(i8, i8)> for Dir {
             Dir::Left => (-1, 0),
             Dir::Right => (1, 0),
         }
+    }
+}
+fn conditional(cell: &mut Cell, cond: bool) {
+    match cell.dir {
+        Dir::Up | Dir::Down => {
+            if cond {
+                cell.dir = Dir::Right;
+            } else {
+                cell.dir = Dir::Left;
+            }
+        }
+        Dir::Left | Dir::Right => {
+            if cond {
+                cell.dir = Dir::Down;
+            } else {
+                cell.dir = Dir::Up;
+            }
+        }
+        _ => {}
     }
 }
